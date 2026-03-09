@@ -1,0 +1,9 @@
+node_modules
+.DS_Store
+*.tsbuildinfo
+
+# media is dropped in and generated locally, never committed
+input/*
+output/*
+!input/.gitkeep
+!output/.gitkeep

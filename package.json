@@ -1,0 +1,23 @@
+{
+  "name": "media-compressor",
+  "version": "1.0.0",
+  "description": "Compress images and videos for the web without losing quality: pixel-exact images, VMAF-checked video, WebP / AVIF / WebM output.",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "typecheck": "tsc",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "engines": {
+    "node": ">=20.12"
+  },
+  "dependencies": {
+    "sharp": "^0.35.5",
+    "svgo": "^4.1.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "tsx": "^4.23.15",
+    "typescript": "~6.0.3"
+  }
+}
