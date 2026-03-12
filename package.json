@@ -5,6 +5,12 @@
   "type": "module",
   "private": true,
   "scripts": {
+    "compress": "tsx bin/compress.ts",
+    "images": "tsx bin/compress.ts images",
+    "images:webp": "tsx bin/compress.ts images --webp",
+    "videos": "tsx bin/compress.ts videos",
+    "videos:webm": "tsx bin/compress.ts videos --webm",
+    "web": "tsx bin/compress.ts all --webp --webm",
     "typecheck": "tsc",
     "test": "tsx --test test/*.test.ts"
   },
