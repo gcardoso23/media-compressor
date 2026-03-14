@@ -2,6 +2,10 @@ node_modules
 .DS_Store
 *.tsbuildinfo
 
+# Next.js
+.next
+next-env.d.ts
+
 # media is dropped in and generated locally, never committed
 input/*
 output/*
