@@ -1,0 +1,26 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+
+      # the engine shells out to these; without libvmaf the video quality tests skip
+      - name: Install ffmpeg and jpegtran
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg libjpeg-turbo-progs
+
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
