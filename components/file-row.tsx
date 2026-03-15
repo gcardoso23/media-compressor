@@ -1,9 +1,13 @@
 'use client';
 
+import { AnimatePresence, motion } from 'motion/react';
+import type { ReactNode } from 'react';
 import type { PublicResult } from '@/engine/server/protocol.ts';
 import { type Choice, describe } from '@/lib/choices.ts';
 import type { Item, Outcome } from '@/lib/files.ts';
 import { capitalise, formatBytes, formatSaving } from '@/lib/format.ts';
+import { EASE, slow, smooth, unfold } from '@/lib/motion.ts';
+import { AnimatedNumber } from './animated-number.tsx';
 import { Controls } from './controls.tsx';
 import { DownloadIcon, RemoveIcon } from './icons.tsx';
 
@@ -21,6 +25,19 @@ const FORMAT_NAMES: Record<string, string> = {
 
 type Written = Extract<PublicResult, { url: string }>;
 
+// A part of the row that opens and closes smoothly.
+function Section({ show, id, children }: { show: boolean; id: string; children: ReactNode }) {
+  return (
+    <AnimatePresence initial={false}>
+      {show && (
+        <motion.div key={id} className="file__section" variants={unfold} initial="hidden" animate="shown" exit="gone">
+          {children}
+        </motion.div>
+      )}
+    </AnimatePresence>
+  );
+}
+
 function verdict(item: Item, result: Written): { text: string; title?: string } {
   if (result.vmaf != null) {
     const ceiling = result.vmafCeiling == null ? '' : ` of ${result.vmafCeiling.toFixed(1)}`;
@@ -36,42 +53,61 @@ function verdict(item: Item, result: Written): { text: string; title?: string } 
   return { text: 'Visually lossless' };
 }
 
+const lineMotion = {
+  hidden: { opacity: 0, y: 8 },
+  shown: { opacity: 1, y: 0, transition: smooth },
+};
+
 function ResultLine({ item, outcome, result }: { item: Item; outcome: Outcome; result: PublicResult }) {
   const label = <span className="line__format">{FORMAT_NAMES[result.format] ?? result.format}</span>;
   if (result.url === undefined) {
     const tip = result.tip === 'lossy' ? ' Visually lossless can make one.' : '';
     return (
-      <div className="line line--skipped">
+      <motion.div className="line line--skipped" variants={lineMotion}>
         {label}
         <p className="line__reason">
           {capitalise(result.skipped)}.{tip}
         </p>
-      </div>
+      </motion.div>
     );
   }
 
   const { text, title } = verdict(item, result);
   const poster = result.format === 'poster';
   const share = Math.min(1, result.bytes / outcome.sourceBytes);
+  const saved = (1 - result.bytes / outcome.sourceBytes) * 100;
   return (
-    <div className="line">
+    <motion.div className="line" variants={lineMotion}>
       {label}
       {poster ? (
         <span />
       ) : (
         <span className="meter" aria-hidden="true">
-          <span className="meter__fill" style={{ transform: `scaleX(${share})` }} />
+          <motion.span
+            className="meter__fill"
+            initial={{ scaleX: 0 }}
+            animate={{ scaleX: share }}
+            transition={{ ...slow, duration: 1.3, delay: 0.15 }}
+          />
         </span>
       )}
       <span className="line__size">{formatBytes(result.bytes)}</span>
-      <span className="line__saving">{poster ? '' : formatSaving(outcome.sourceBytes, result.bytes)}</span>
+      {poster ? (
+        <span />
+      ) : (
+        <AnimatedNumber
+          className="line__saving figure"
+          value={saved}
+          format={(value) => formatSaving(100, 100 - value)}
+        />
+      )}
       <span className="line__verdict" title={title}>
         {text}
       </span>
       <a className="icon-btn" href={`${result.url}?download`} download={result.name} aria-label={`Download ${result.name}`}>
         <DownloadIcon />
       </a>
-    </div>
+    </motion.div>
   );
 }
 
@@ -81,38 +117,13 @@ const describeStage = (stage: string) =>
     pass ? `encoding, pass ${pass} of ${passes}` : 'encoding',
   );
 
-function Status({ item, onRetry }: { item: Item; onRetry: () => void }) {
-  if (item.status === 'error') {
-    return (
-      <div className="status status--error">
-        <span>{item.error ?? 'Something went wrong.'}</span>
-        <button className="btn btn--link" type="button" onClick={onRetry}>
-          Try again
-        </button>
-      </div>
-    );
-  }
-
-  let text = '';
-  let ratio: number | null = null;
-  if (item.status === 'reading') text = 'Reading';
-  else if (item.status === 'waiting') text = 'Waiting';
-  else if (item.status === 'working') {
-    if (item.progress) {
-      text = `${FORMAT_NAMES[item.progress.format] ?? item.progress.format}: ${describeStage(item.progress.stage)}`;
-      ratio = item.progress.ratio;
-    } else text = item.kind === 'video' ? 'Starting' : 'Compressing and checking every pixel';
-  }
-  if (!text) return null;
-
-  return (
-    <div className={`status${ratio === null ? ' is-indeterminate' : ''}`}>
-      <span className="status__track" aria-hidden="true">
-        <span className="status__fill" style={ratio === null ? undefined : { transform: `scaleX(${ratio})` }} />
-      </span>
-      <span className="status__text">{ratio === null ? text : `${text}, ${Math.round(ratio * 100)}%`}</span>
-    </div>
-  );
+function statusOf(item: Item): { text: string; ratio: number | null } | null {
+  if (item.status === 'reading') return { text: 'Reading', ratio: null };
+  if (item.status === 'waiting') return { text: 'Waiting', ratio: null };
+  if (item.status !== 'working') return null;
+  if (!item.progress) return { text: item.kind === 'video' ? 'Starting' : 'Compressing and checking every pixel', ratio: null };
+  const format = FORMAT_NAMES[item.progress.format] ?? item.progress.format;
+  return { text: `${format}: ${describeStage(item.progress.stage)}`, ratio: item.progress.ratio };
 }
 
 export interface FileRowProps {
@@ -136,8 +147,9 @@ export function FileRow({ item, choice, canCustomise, open, stale, onToggle, onC
   const meta = [formatBytes(item.bytes), sized && `${sized.width} × ${sized.height}`].filter(Boolean).join(', ');
   const dot = item.name.lastIndexOf('.');
   const busy = item.status === 'working' || item.status === 'waiting';
+  const status = statusOf(item);
 
-  let note: React.ReactNode = null;
+  let note: ReactNode = null;
   if (item.status === 'unsupported') note = item.error;
   else if (item.vector) note = 'Vector: optimised as SVG, nothing to set.';
   else if (item.custom && !open) {
@@ -152,15 +164,30 @@ export function FileRow({ item, choice, canCustomise, open, stale, onToggle, onC
   }
 
   return (
-    <article className="file">
+    <motion.article
+      className="file"
+      initial={{ opacity: 0, y: 18 }}
+      animate={{ opacity: 1, y: 0 }}
+      // folds its height away, so the rows below slide up into place
+      exit={{
+        opacity: 0,
+        height: 0,
+        paddingTop: 0,
+        paddingBottom: 0,
+        transition: { duration: 0.45, ease: EASE, opacity: { duration: 0.2 } },
+      }}
+      transition={smooth}
+    >
       <div className="thumb">
-        {item.preview ? (
-          // a local object URL: next/image has nothing to optimise here
-          // eslint-disable-next-line @next/next/no-img-element
-          <img src={item.preview} alt="" />
-        ) : (
-          <span className="thumb__ext">{dot === -1 ? '' : item.name.slice(dot + 1, dot + 5).toLowerCase()}</span>
-        )}
+        <AnimatePresence initial={false}>
+          {item.preview ? (
+            // a local object URL: next/image has nothing to optimise here
+            // eslint-disable-next-line @next/next/no-img-element
+            <motion.img key="preview" src={item.preview} alt="" initial={{ opacity: 0 }} animate={{ opacity: 1 }} transition={smooth} />
+          ) : (
+            <span className="thumb__ext">{dot === -1 ? '' : item.name.slice(dot + 1, dot + 5).toLowerCase()}</span>
+          )}
+        </AnimatePresence>
       </div>
 
       <div className="file__main">
@@ -181,35 +208,74 @@ export function FileRow({ item, choice, canCustomise, open, stale, onToggle, onC
           </div>
         </div>
 
-        {note && <div className="file__note">{note}</div>}
+        <Section show={Boolean(note)} id="note">
+          <div className="file__note">{note}</div>
+        </Section>
 
-        {open && choice && (
-          <div className="panel">
-            <Controls choice={choice} onChange={onChange} />
-            {item.custom && (
-              <button className="btn btn--link panel__reset" type="button" onClick={onReset}>
-                Use shared settings
+        <Section show={open && Boolean(choice)} id="panel">
+          {choice && (
+            <div className="panel">
+              <Controls choice={choice} onChange={onChange} />
+              {item.custom && (
+                <button className="btn btn--link panel__reset" type="button" onClick={onReset}>
+                  Use shared settings
+                </button>
+              )}
+            </div>
+          )}
+        </Section>
+
+        <Section show={item.status === 'error'} id="error">
+          <div className="status status--error">
+            <span className="status__text">
+              <span>{item.error ?? 'Something went wrong.'}</span>
+              <button className="btn btn--link" type="button" onClick={onRetry}>
+                Try again
               </button>
-            )}
+            </span>
           </div>
-        )}
+        </Section>
 
-        <Status item={item} onRetry={onRetry} />
+        <Section show={status !== null} id="status">
+          {status && (
+            <div className={`status${status.ratio === null ? ' is-indeterminate' : ''}`}>
+              <span className="status__track" aria-hidden="true">
+                <motion.span
+                  className="status__fill"
+                  initial={false}
+                  // the sweeping bar of unmeasured work runs full width
+                  animate={{ scaleX: status.ratio ?? 1 }}
+                  transition={{ duration: 0.4, ease: 'easeOut' }}
+                />
+              </span>
+              <span className="status__text">{status.ratio === null ? status.text : `${status.text}, ${Math.round(status.ratio * 100)}%`}</span>
+            </div>
+          )}
+        </Section>
 
-        {item.outcome && (
-          // results from older settings stay visible, dimmed, until they are redone
-          <div className={`results${stale || busy ? ' is-stale' : ''}`}>
-            {item.outcome.results.map((result) => (
-              <ResultLine key={result.name + result.format} item={item} outcome={item.outcome as Outcome} result={result} />
-            ))}
-            {item.outcome.warnings.map((warning) => (
-              <p key={warning} className="warning">
-                {capitalise(warning)}
-              </p>
-            ))}
-          </div>
-        )}
+        <Section show={Boolean(item.outcome)} id="results">
+          {item.outcome && (
+            // results from older settings stay visible, dimmed, until they are redone
+            <motion.div
+              // a new key per run replays the lines arriving
+              key={item.outcome.results[0]?.url ?? item.ran}
+              className={`results${stale || busy ? ' is-stale' : ''}`}
+              initial="hidden"
+              animate="shown"
+              variants={{ shown: { transition: { staggerChildren: 0.07, delayChildren: 0.1 } } }}
+            >
+              {item.outcome.results.map((result) => (
+                <ResultLine key={result.name + result.format} item={item} outcome={item.outcome as Outcome} result={result} />
+              ))}
+              {item.outcome.warnings.map((warning) => (
+                <motion.p key={warning} className="warning" variants={lineMotion}>
+                  {capitalise(warning)}
+                </motion.p>
+              ))}
+            </motion.div>
+          )}
+        </Section>
       </div>
-    </article>
+    </motion.article>
   );
 }

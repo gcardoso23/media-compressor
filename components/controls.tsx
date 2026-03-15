@@ -1,7 +1,10 @@
 'use client';
 
+import { AnimatePresence, animate, motion } from 'motion/react';
 import { type ReactNode, useEffect, useId, useState } from 'react';
 import { type Choice, type ImageChoice, RESIZE_MODES, type ResizeMode, type VideoChoice } from '@/lib/choices.ts';
+import { smooth, spring } from '@/lib/motion.ts';
+import { ChevronIcon } from './icons.tsx';
 
 const HINTS = {
   exact: 'Every pixel stays identical, and each file is checked against its original before you get it.',
@@ -29,35 +32,37 @@ function Chips<T extends string>({
   value: T[];
   onChange: (next: T[]) => void;
 }) {
-  const toggle = (option: T) => {
+  const toggle = (option: T, button: HTMLButtonElement) => {
     const on = value.includes(option);
-    if (on && value.length === 1) return;
+    if (on && value.length === 1) {
+      // the last one left can't be switched off: it shakes instead
+      animate(button, { x: [0, -5, 5, -3, 3, 0] }, { duration: 0.4 });
+      return;
+    }
     const next = on ? value.filter((item) => item !== option) : [...value, option];
     // keep the options' own order, so "original" always comes first
     onChange(options.map(([item]) => item).filter((item) => next.includes(item)));
   };
+
   return (
     <div className="chips" role="group" aria-label={label}>
-      {options.map(([option, text]) => {
-        const on = value.includes(option);
-        return (
-          <button
-            key={option}
-            type="button"
-            className="chip"
-            aria-pressed={on}
-            title={on && value.length === 1 ? 'At least one has to stay on' : undefined}
-            onClick={() => toggle(option)}
-          >
-            {text}
-          </button>
-        );
-      })}
+      {options.map(([option, text]) => (
+        <button
+          key={option}
+          type="button"
+          className="chip"
+          aria-pressed={value.includes(option)}
+          title={value.includes(option) && value.length === 1 ? 'At least one has to stay on' : undefined}
+          onClick={(event) => toggle(option, event.currentTarget)}
+        >
+          {text}
+        </button>
+      ))}
     </div>
   );
 }
 
-// One option out of a few.
+// One option out of a few, with a white pill that slides to the chosen one.
 function Segmented<T extends string>({
   label,
   options,
@@ -75,7 +80,8 @@ function Segmented<T extends string>({
       {options.map(([option, text]) => (
         <label key={option} className="segmented__option">
           <input type="radio" name={name} value={option} checked={option === value} onChange={() => onChange(option)} />
-          <span>{text}</span>
+          {option === value && <motion.span layoutId={`${name}-thumb`} className="segmented__thumb" transition={spring} />}
+          <span className="segmented__text">{text}</span>
         </label>
       ))}
     </div>
@@ -113,32 +119,43 @@ function SizeControl({
 
   return (
     <div className="size">
-      <select className="select" aria-label="Size" value={resize} onChange={(event) => pick(event.target.value as ResizeMode)}>
-        {RESIZE_MODES.map(([mode, text]) => (
-          <option key={mode} value={mode}>
-            {text}
-          </option>
-        ))}
-      </select>
-      {resize !== 'none' && (
-        <label className="amount-wrap">
-          <input
-            className="amount"
-            type="number"
-            inputMode="numeric"
-            min={1}
-            max={scale ? 100 : undefined}
-            aria-label="Amount"
-            value={draft}
-            onChange={(event) => setDraft(event.target.value)}
-            onBlur={commit}
-            onKeyDown={(event) => {
-              if (event.key === 'Enter') commit();
-            }}
-          />
-          <span>{scale ? '%' : 'px'}</span>
-        </label>
-      )}
+      <span className="select-wrap">
+        <select className="select" aria-label="Size" value={resize} onChange={(event) => pick(event.target.value as ResizeMode)}>
+          {RESIZE_MODES.map(([mode, text]) => (
+            <option key={mode} value={mode}>
+              {text}
+            </option>
+          ))}
+        </select>
+        <ChevronIcon />
+      </span>
+      <AnimatePresence initial={false}>
+        {resize !== 'none' && (
+          <motion.label
+            className="amount-wrap"
+            initial={{ opacity: 0, x: -8 }}
+            animate={{ opacity: 1, x: 0 }}
+            exit={{ opacity: 0, x: -8 }}
+            transition={smooth}
+          >
+            <input
+              className="amount"
+              type="number"
+              inputMode="numeric"
+              min={1}
+              max={scale ? 100 : undefined}
+              aria-label="Amount"
+              value={draft}
+              onChange={(event) => setDraft(event.target.value)}
+              onBlur={commit}
+              onKeyDown={(event) => {
+                if (event.key === 'Enter') commit();
+              }}
+            />
+            <span>{scale ? '%' : 'px'}</span>
+          </motion.label>
+        )}
+      </AnimatePresence>
     </div>
   );
 }
@@ -169,7 +186,18 @@ function ImageControls({ choice, onChange }: { choice: ImageChoice; onChange: (n
           value={choice.quality}
           onChange={(quality) => set({ quality })}
         />
-        <p className="field__hint">{HINTS[choice.quality]}</p>
+        <AnimatePresence mode="wait" initial={false}>
+          <motion.p
+            key={choice.quality}
+            className="field__hint"
+            initial={{ opacity: 0, y: 4 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -4 }}
+            transition={{ duration: 0.25 }}
+          >
+            {HINTS[choice.quality]}
+          </motion.p>
+        </AnimatePresence>
       </Field>
       <Field label="Size">
         <SizeControl resize={choice.resize} amount={choice.amount} onChange={set} />

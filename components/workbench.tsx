@@ -1,5 +1,6 @@
 'use client';
 
+import { AnimatePresence, MotionConfig, motion } from 'motion/react';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { kindOf } from '@/engine/media.ts';
 import type { Flags, Tools } from '@/engine/server/protocol.ts';
@@ -9,6 +10,7 @@ import { compressFile, describeError, forgetFile, getTools, uploadFile } from '@
 import { type Choice, type Choices, DEFAULTS, loadChoices, saveChoices, toFlags } from '@/lib/choices.ts';
 import { type Item, filesFrom, videoFrame } from '@/lib/files.ts';
 import { plural } from '@/lib/format.ts';
+import { slow, smooth } from '@/lib/motion.ts';
 import { Controls } from './controls.tsx';
 import { Dock } from './dock.tsx';
 import { FileRow } from './file-row.tsx';
@@ -240,85 +242,131 @@ export function Workbench() {
   else if (tools && !tools.vmaf) missing.push("This ffmpeg has no libvmaf, so video quality won't be measured.");
   if (tools && !tools.jpegtran) missing.push('JPEGs pass through untouched until jpegtran is installed: brew install jpeg-turbo.');
 
+  const fade = { initial: { opacity: 0 }, animate: { opacity: 1 }, exit: { opacity: 0 } };
+
   return (
-    <>
+    <MotionConfig reducedMotion="user" transition={smooth}>
       <header className="bar">
-        <span className="brand">media-compressor</span>
-        {items.length > 0 && (
-          <div className="bar__actions">
-            <button className="btn btn--text" type="button" onClick={clear}>
-              Clear all
-            </button>
-            <button className="btn btn--ghost" type="button" onClick={choose}>
-              Add files
-            </button>
-          </div>
-        )}
+        <AnimatePresence>
+          {items.length > 0 && (
+            <motion.div key="actions" className="bar__actions" {...fade}>
+              <button className="btn btn--text" type="button" onClick={clear}>
+                Clear all
+              </button>
+              <button className="btn btn--ghost" type="button" onClick={choose}>
+                Add files
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </header>
 
       <main>
-        {items.length === 0 ? (
-          <section className="hero">
-            <button className="hero__drop" type="button" onClick={choose}>
-              <span className="hero__title">Drop images or videos</span>
-              <span className="hero__hint">Or click to choose files. Everything stays on this computer.</span>
-            </button>
-          </section>
-        ) : (
-          <div className="workspace">
-            <div className="settings">
-              {KINDS.filter((kind) => count(kind) > 0).map((kind) => (
-                <section key={kind} className="group">
-                  <header className="group__head">
-                    <h2 className="group__title">{plural(count(kind), kind)}</h2>
-                    <p className="group__sub">
-                      {count(kind) > 1 ? `These apply to every ${kind} unless you customise one.` : `Settings for this ${kind}.`}
-                    </p>
-                  </header>
-                  <Controls choice={shared[kind]} onChange={(choice) => changeShared(kind, choice)} />
-                </section>
-              ))}
-            </div>
+        <AnimatePresence mode="wait">
+          {items.length === 0 ? (
+            <motion.section
+              key="hero"
+              className="hero"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0, scale: 0.98, filter: 'blur(6px)', transition: { duration: 0.35 } }}
+            >
+              <button className="hero__drop" type="button" onClick={choose}>
+                <span className="hero__title">
+                  <motion.span initial={{ y: '105%' }} animate={{ y: 0 }} transition={{ ...slow, delay: 0.1 }}>
+                    Drop images or videos
+                  </motion.span>
+                </span>
+                <motion.span
+                  className="hero__hint"
+                  initial={{ opacity: 0, y: 4 }}
+                  animate={{ opacity: 1, y: 0 }}
+                  transition={{ ...slow, delay: 0.25 }}
+                >
+                  or click to choose. Everything stays on this computer.
+                </motion.span>
+              </button>
+            </motion.section>
+          ) : (
+            <motion.div
+              key="workspace"
+              className="workspace"
+              initial={{ opacity: 0, y: 20 }}
+              animate={{ opacity: 1, y: 0 }}
+              exit={{ opacity: 0, transition: { duration: 0.3 } }}
+            >
+              <div className="settings">
+                <AnimatePresence initial={false}>
+                  {KINDS.filter((kind) => count(kind) > 0).map((kind) => (
+                    <motion.section
+                      key={kind}
+                      className="group"
+                      initial={{ opacity: 0, y: 14 }}
+                      animate={{ opacity: 1, y: 0 }}
+                      exit={{ opacity: 0, scale: 0.98, transition: { duration: 0.25 } }}
+                    >
+                      <header className="group__head">
+                        <h2 className="group__title">{plural(count(kind), kind)}</h2>
+                        <p className="group__sub">
+                          {count(kind) > 1 ? `These apply to every ${kind} unless you customise one.` : `Settings for this ${kind}.`}
+                        </p>
+                      </header>
+                      <Controls choice={shared[kind]} onChange={(choice) => changeShared(kind, choice)} />
+                    </motion.section>
+                  ))}
+                </AnimatePresence>
+              </div>
 
-            <div className="files" aria-live="polite">
-              {items.map((item) => (
-                <FileRow
-                  key={item.key}
-                  item={item}
-                  choice={configurable(item) ? (item.custom ?? shared[item.kind]) : null}
-                  canCustomise={configurable(item) && count(item.kind) > 1}
-                  open={open === item.key}
-                  stale={isStale(item, shared)}
-                  onToggle={() => setOpen(open === item.key ? null : item.key)}
-                  onChange={(choice) => patch(item.key, { custom: choice })}
-                  onReset={() => {
-                    patch(item.key, { custom: undefined });
-                    if (open === item.key) setOpen(null);
-                  }}
-                  onRemove={() => remove(item)}
-                  onRetry={() => {
-                    setBatch({ total: 1, finished: 0 });
-                    void run(item, flagsFor(item, shared));
-                  }}
-                />
-              ))}
-            </div>
-          </div>
-        )}
+              <div className="files" aria-live="polite">
+                <AnimatePresence initial={false}>
+                  {items.map((item) => (
+                    <FileRow
+                      key={item.key}
+                      item={item}
+                      choice={configurable(item) ? (item.custom ?? shared[item.kind]) : null}
+                      canCustomise={configurable(item) && count(item.kind) > 1}
+                      open={open === item.key}
+                      stale={isStale(item, shared)}
+                      onToggle={() => setOpen(open === item.key ? null : item.key)}
+                      onChange={(choice) => patch(item.key, { custom: choice })}
+                      onReset={() => {
+                        patch(item.key, { custom: undefined });
+                        if (open === item.key) setOpen(null);
+                      }}
+                      onRemove={() => remove(item)}
+                      onRetry={() => {
+                        setBatch({ total: 1, finished: 0 });
+                        void run(item, flagsFor(item, shared));
+                      }}
+                    />
+                  ))}
+                </AnimatePresence>
+              </div>
+            </motion.div>
+          )}
+        </AnimatePresence>
       </main>
 
-      {items.length > 0 && <Dock items={items} pending={pending} busy={busy} batch={batch} onCompress={compressAll} />}
+      <AnimatePresence>
+        {items.length > 0 && <Dock key="dock" items={items} pending={pending} busy={busy} batch={batch} onCompress={compressAll} />}
+      </AnimatePresence>
 
-      {dragging && (
-        <div className="veil" aria-hidden="true">
-          Release to add
-        </div>
-      )}
-      {missing.length > 0 && items.length === 0 && (
-        <p className="notice" role="status">
-          {missing.join(' ')}
-        </p>
-      )}
+      <AnimatePresence>
+        {dragging && (
+          <motion.div key="veil" className="veil" aria-hidden="true" {...fade} transition={{ duration: 0.25 }}>
+            <motion.span initial={{ scale: 0.96, opacity: 0 }} animate={{ scale: 1, opacity: 1 }} transition={smooth}>
+              Release to add
+            </motion.span>
+          </motion.div>
+        )}
+      </AnimatePresence>
+      <AnimatePresence>
+        {missing.length > 0 && items.length === 0 && (
+          <motion.p key="notice" className="notice" role="status" {...fade}>
+            {missing.join(' ')}
+          </motion.p>
+        )}
+      </AnimatePresence>
 
       <input
         ref={picker}
@@ -330,6 +378,6 @@ export function Workbench() {
           event.target.value = '';
         }}
       />
-    </>
+    </MotionConfig>
   );
 }
