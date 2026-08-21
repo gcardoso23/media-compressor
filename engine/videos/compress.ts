@@ -4,6 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import sharp from 'sharp';
 import type { Config, Job, Outcome, PlannedOutput, Progress, Result, VideoCodec, VideoFormat, VideoSettings } from '../types.ts';
+import { type MediaInfo, videoStepCosts } from '../estimate.ts';
 import { buildPasses, canCopy, copyArgs, posterArgs, vmafArgs } from './args.ts';
 import { type VideoInfo, ffmpeg, hasFilter, probe } from './ffmpeg.ts';
 
@@ -57,16 +58,42 @@ export async function compressVideo(
 
   const tmp = await mkdtemp(path.join(os.tmpdir(), 'media-compressor-'));
   partials.add(tmp);
-  const track = (format: string, stage: string) => (seconds: number) =>
-    onProgress?.({ format, stage, ratio: info.duration ? Math.min(1, seconds / info.duration) : 0 });
+
+  // Progress over the whole file: every pass and quality check, of every
+  // output, weighted by how long it takes. A retry adds its steps as it starts.
+  const media: MediaInfo = { width: info.width, height: info.height, frames: Math.max(1, Math.round(info.duration * info.fps)) };
+  const costsOf = (format: VideoFormat) => videoStepCosts(media, format === 'mp4' ? 'h264' : videos.webmCodec, videos.resize);
+  const encodeCost = (format: VideoFormat) => costsOf(format).passes.reduce((sum, cost) => sum + cost, 0);
+  const work = { done: 0, total: 0 };
+  for (const out of job.outputs) {
+    const format = out.format as VideoFormat;
+    work.total += encodeCost(format) + (measured ? costsOf(format).vmaf : 0);
+  }
+  const planned = work.total;
+
+  // Runs one ffmpeg step worth `cost`, reporting its progress and the file's.
+  const step = async (args: string[], format: string, stage: string, cost: number, options: { cwd?: string } = {}) => {
+    const report = (ratio: number) =>
+      onProgress?.({
+        format,
+        stage,
+        ratio,
+        overall: Math.min(1, (work.done + cost * ratio) / work.total),
+        scale: work.total / planned,
+      });
+    // announced up front: a first VP9 pass writes no packets, so it never reports a position
+    report(0);
+    await ffmpeg(args, {
+      ...options,
+      signal,
+      onProgress: (seconds) => report(info.duration ? Math.min(1, seconds / info.duration) : 0),
+    });
+    work.done += cost;
+  };
 
   // VMAF of `encoded` against the source, or of the source against itself.
-  const score = async ({ encoded, fps, format, stage }: { encoded?: string; fps: number; format: string; stage: string }) => {
-    await ffmpeg(vmafArgs({ source: job.source, encoded, info, videos, fps }), {
-      cwd: tmp,
-      signal,
-      onProgress: track(format, stage),
-    });
+  const score = async ({ encoded, fps, format, stage }: { encoded?: string; fps: number; format: VideoFormat; stage: string }) => {
+    await step(vmafArgs({ source: job.source, encoded, info, videos, fps }), format, stage, costsOf(format).vmaf, { cwd: tmp });
     const log = JSON.parse(await readFile(path.join(tmp, 'vmaf.json'), 'utf8')) as {
       pooled_metrics: { vmaf: { mean: number } };
     };
@@ -78,18 +105,25 @@ export async function compressVideo(
   let ceiling: number | undefined;
 
   const encode = async (out: PlannedOutput, codec: VideoCodec, crf: number, partial: string): Promise<Quality> => {
+    const format = out.format as VideoFormat;
     const passes = buildPasses({ source: job.source, target: partial, codec, crf, info, videos, passlog: path.join(tmp, 'pass') });
+    const planned = costsOf(format).passes;
+    // a single-pass VP9 does all of its work in that one pass
+    const costs = passes.length === planned.length ? planned : [encodeCost(format)];
     for (const [index, args] of passes.entries()) {
       const stage = passes.length > 1 ? `crf ${crf}, pass ${index + 1}/${passes.length}` : `crf ${crf}`;
-      await ffmpeg(args, { signal, onProgress: track(out.format, stage) });
+      await step(args, format, stage, costs[index] ?? 0);
     }
     if (!measured) return { ok: true };
 
     const { fps } = await probe(partial);
-    const vmaf = await score({ encoded: partial, fps, format: out.format, stage: 'measuring quality' });
+    const vmaf = await score({ encoded: partial, fps, format, stage: 'measuring quality' });
     // close enough to 100 passes whatever the ceiling turns out to be
     if (vmaf >= 100 - maxLoss) return { ok: true, vmaf };
-    ceiling ??= await score({ fps, format: out.format, stage: 'measuring the source' });
+    if (ceiling === undefined) {
+      work.total += costsOf(format).vmaf;
+      ceiling = await score({ fps, format, stage: 'measuring the source' });
+    }
     return { ok: vmaf >= ceiling - maxLoss, vmaf, vmafCeiling: ceiling };
   };
 
@@ -115,6 +149,7 @@ export async function compressVideo(
         let quality = await encode(out, codec, crf, partial);
         for (let attempt = 1; !quality.ok && attempt < attempts && crf > 0; attempt++) {
           crf = Math.max(0, crf - crfStep);
+          work.total += encodeCost(format) + (measured ? costsOf(format).vmaf : 0);
           quality = await encode(out, codec, crf, partial);
         }
 

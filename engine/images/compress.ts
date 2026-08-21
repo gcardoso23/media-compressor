@@ -1,7 +1,8 @@
 import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sharp from 'sharp';
-import type { ImageFormat, ImageOptions, Job, Outcome, Result } from '../types.ts';
+import { imageOutputCost } from '../estimate.ts';
+import type { ImageFormat, ImageOptions, Job, Outcome, Progress, Result } from '../types.ts';
 import { type Size, fitSize } from '../utils/size.ts';
 import { hasRedundantProfile } from './icc.ts';
 import { type Encoded, type ExactEncoder, createExactEncoder } from './lossless.ts';
@@ -20,8 +21,12 @@ async function write(file: string, data: Buffer) {
 }
 
 // Encodes every planned output of one source image, with one result per file
-// written or deliberately skipped.
-export async function compressImage(job: Job, images: ImageOptions): Promise<Outcome> {
+// written or deliberately skipped. `onProgress` hears as each output starts.
+export async function compressImage(
+  job: Job,
+  images: ImageOptions,
+  { onProgress }: { onProgress?: (progress: Progress) => void } = {},
+): Promise<Outcome> {
   const input = await readFile(job.source);
 
   const [first] = job.outputs;
@@ -74,8 +79,18 @@ export async function compressImage(job: Job, images: ImageOptions): Promise<Out
   // the source's own format first, so it sets the baseline for the conversions
   const outputs = [...job.outputs].sort((a, b) => Number(Boolean(b.native)) - Number(Boolean(a.native)));
 
-  for (const out of outputs) {
+  // progress is weighted by how long each output takes: an exact AVIF far outweighs a JPEG repack
+  const media = { width: source.width, height: source.height, frames: animated ? (meta.pages ?? 1) : 1 };
+  const costs = outputs.map((out) =>
+    imageOutputCost(job.source, media, out.format as ImageFormat, exactOnly, out.width ? { width: out.width } : images.resize),
+  );
+  const total = costs.reduce((sum, cost) => sum + cost, 0);
+  let done = 0;
+
+  for (const [index, out] of outputs.entries()) {
     const format = out.format as ImageFormat;
+    onProgress?.({ format, stage: 'compressing', ratio: 0, overall: total ? done / total : 0, scale: 1 });
+    done += costs[index] ?? 0;
     let size = fullSize;
     if (out.width) {
       // the full-size file already covers widths the source can't fill

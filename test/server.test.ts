@@ -55,9 +55,16 @@ test('a file goes in, is compressed, and comes back identical and smaller', asyn
   const { status, body: file } = await upload('photo.png', source);
   assert.equal(status, 201);
   assert.deepEqual({ name: file.name, kind: file.kind, bytes: file.bytes }, { name: 'photo.png', kind: 'image', bytes: source.length });
+  // what the interface needs to estimate the work
+  assert.deepEqual(file.media, { width: 240, height: 160, frames: 1 });
 
   const { events, done } = await compress(file.id, { format: 'original,webp' });
-  assert.deepEqual(events.map((event) => event.type), ['queued', 'started', 'done']);
+  assert.deepEqual(
+    events.map((event) => event.type).filter((type) => type !== 'progress'),
+    ['queued', 'started', 'done'],
+  );
+  // one as each output starts
+  assert.equal(events.filter((event) => event.type === 'progress').length, 2);
   const results = written(done);
   assert.deepEqual(results.map((result) => [result.name, result.exact]), [['photo.png', true], ['photo.webp', true]]);
 

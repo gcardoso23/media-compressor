@@ -1,5 +1,6 @@
 // What the local server and the interface say to each other. Type-only, so
 // the browser code can import it without pulling in Node.
+import type { MediaInfo } from '../estimate.ts';
 import type { MediaKind, Progress, Skipped, Written } from '../types.ts';
 
 // Settings for one run, as flag name → value (the same flags the folder scripts take).
@@ -10,6 +11,8 @@ export interface Uploaded {
   name: string;
   kind: MediaKind;
   bytes: number;
+  // dimensions and length, for estimating the work; null when unreadable
+  media: MediaInfo | null;
 }
 
 export interface Tools {

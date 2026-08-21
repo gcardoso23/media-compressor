@@ -116,5 +116,11 @@ export interface Outcome {
 export interface Progress {
   format: string;
   stage: string;
+  // how far the current stage is
   ratio: number;
+  // how far the whole file is, all outputs and stages together
+  overall: number;
+  // the file's work as now known, against what was planned: 1 until a quality
+  // retry adds encodes
+  scale: number;
 }

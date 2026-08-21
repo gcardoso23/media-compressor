@@ -5,14 +5,17 @@ import os from 'node:os';
 import path from 'node:path';
 import type { Readable } from 'node:stream';
 import { pipeline } from 'node:stream/promises';
+import sharp from 'sharp';
 import defaults from '../../media.config.ts';
+import type { MediaInfo } from '../estimate.ts';
 import { compressImage } from '../images/compress.ts';
 import { kindOf } from '../media.ts';
 import { OPTIONS, applyFlags } from '../options.ts';
 import { planJobs } from '../plan.ts';
-import { type Config, type MediaKind, isSkipped } from '../types.ts';
+import { type Config, type MediaKind, type Progress, isSkipped } from '../types.ts';
 import { limiter } from '../utils/pool.ts';
 import { compressVideo } from '../videos/compress.ts';
+import { probe } from '../videos/ffmpeg.ts';
 import type { CompressEvent, Flags, PublicResult, Uploaded } from './protocol.ts';
 import type { ZipEntry } from './zip.ts';
 
@@ -37,6 +40,22 @@ interface Entry {
   queue: Promise<void>;
 }
 
+// What the interface needs to estimate how long a file will take.
+async function inspect(file: string, kind: MediaKind): Promise<MediaInfo | null> {
+  try {
+    if (kind === 'video') {
+      const info = await probe(file);
+      return { width: info.width, height: info.height, frames: Math.max(1, Math.round(info.duration * info.fps)), duration: info.duration };
+    }
+    const meta = await sharp(file, { animated: true }).metadata();
+    const frames = meta.pages ?? 1;
+    if (frames > 1) return { width: meta.width, height: meta.pageHeight ?? meta.height, frames };
+    return { width: meta.autoOrient?.width ?? meta.width, height: meta.autoOrient?.height ?? meta.height, frames: 1 };
+  } catch {
+    return null;
+  }
+}
+
 // Flags that only make sense for the folder scripts.
 const FOLDER_ONLY = new Set(['out', 'config', 'force', 'dry-run', 'help']);
 
@@ -51,23 +70,38 @@ function pickFlags(body: unknown): Flags {
   return flags;
 }
 
-// What the interface works with: uploaded sources and their latest outputs,
-// kept in a temporary folder that is removed when the process exits.
+interface State {
+  root: string;
+  files: Map<string, Entry>;
+  slots: Record<MediaKind, ReturnType<typeof limiter>>;
+}
+
+// The uploads live on globalThis, so they survive Next.js re-evaluating
+// modules in development. Only data is kept there: the functions below always
+// come from the current code.
+const KEY = Symbol.for('media-compressor.uploads');
+const holder = globalThis as typeof globalThis & { [KEY]?: State };
+
+function state(): State {
+  if (!holder[KEY]) {
+    // kept in a temporary folder that is removed when the process exits
+    const root = mkdtempSync(path.join(os.tmpdir(), 'media-compressor-'));
+    process.on('exit', () => rmSync(root, { recursive: true, force: true }));
+    for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => process.exit(0));
+    // sharp is multi-threaded per image and ffmpeg per video, so videos run one at a time
+    holder[KEY] = { root, files: new Map(), slots: { image: limiter(3), video: limiter(1) } };
+  }
+  return holder[KEY];
+}
+
+function entryFor(id: string): Entry {
+  const entry = state().files.get(id);
+  if (!entry) throw new HttpError(404, 'That file is no longer on the server. Add it again.');
+  return entry;
+}
+
+// What the interface works with: uploaded sources and their latest outputs.
 function createStore() {
-  const root = mkdtempSync(path.join(os.tmpdir(), 'media-compressor-'));
-  process.on('exit', () => rmSync(root, { recursive: true, force: true }));
-  for (const signal of ['SIGINT', 'SIGTERM'] as const) process.once(signal, () => process.exit(0));
-
-  const files = new Map<string, Entry>();
-  // sharp is multi-threaded per image and ffmpeg per video, so videos run one at a time
-  const slots: Record<MediaKind, ReturnType<typeof limiter>> = { image: limiter(3), video: limiter(1) };
-
-  const entryFor = (id: string) => {
-    const entry = files.get(id);
-    if (!entry) throw new HttpError(404, 'That file is no longer on the server. Add it again.');
-    return entry;
-  };
-
   return {
     async upload(rawName: string, body: Readable): Promise<Uploaded> {
       const name = path.basename(rawName).replace(/[\\/:\0]/g, '_');
@@ -75,12 +109,12 @@ function createStore() {
       if (!kind) throw new HttpError(415, `${name || 'This file'} is not an image or video this tool can read`);
 
       const id = randomUUID().slice(0, 8);
-      const dir = path.join(root, id);
+      const dir = path.join(state().root, id);
       const source = path.join(dir, 'source', name);
       await mkdir(path.dirname(source), { recursive: true });
       await pipeline(body, createWriteStream(source));
-      files.set(id, { id, name, kind, dir, source, outputs: [], runs: 0, queue: Promise.resolve() });
-      return { id, name, kind, bytes: (await stat(source)).size };
+      state().files.set(id, { id, name, kind, dir, source, outputs: [], runs: 0, queue: Promise.resolve() });
+      return { id, name, kind, bytes: (await stat(source)).size, media: await inspect(source, kind) };
     },
 
     // Validates the settings up front, so a bad request fails before streaming starts.
@@ -97,10 +131,11 @@ function createStore() {
     async compress(entry: Entry, config: Config, send: (event: CompressEvent) => void, signal: AbortSignal): Promise<void> {
       send({ type: 'queued' });
       const work = () =>
-        slots[entry.kind](async () => {
+        state().slots[entry.kind](async () => {
           if (signal.aborted) return;
           send({ type: 'started' });
 
+          const report = (progress: Progress) => send({ type: 'progress', ...progress });
           // every run gets its own folder, so a download never reads a half-written file
           const run = ++entry.runs;
           const outDir = path.join(entry.dir, `out-${run}`);
@@ -108,8 +143,8 @@ function createStore() {
           if (!job) throw new Error(`${entry.name} has nothing to compress`);
           const { sourceBytes, results, warnings = [] } =
             entry.kind === 'image'
-              ? await compressImage(job, { ...config.images, skipLarger: config.skipLarger })
-              : await compressVideo(job, config, { signal, onProgress: (progress) => send({ type: 'progress', ...progress }) });
+              ? await compressImage(job, { ...config.images, skipLarger: config.skipLarger }, { onProgress: report })
+              : await compressVideo(job, config, { signal, onProgress: report });
 
           entry.outputs = results.flatMap((result) => (isSkipped(result) ? [] : [result.output]));
           if (run > 1) await rm(path.join(entry.dir, `out-${run - 1}`), { recursive: true, force: true });
@@ -137,7 +172,7 @@ function createStore() {
 
     async remove(id: string): Promise<void> {
       const entry = entryFor(id);
-      files.delete(id);
+      state().files.delete(id);
       await rm(entry.dir, { recursive: true, force: true });
     },
 
@@ -150,7 +185,7 @@ function createStore() {
       const used = new Set<string>();
       const entries: ZipEntry[] = [];
       for (const id of ids) {
-        for (const output of files.get(id)?.outputs ?? []) {
+        for (const output of state().files.get(id)?.outputs ?? []) {
           // two sources can produce the same name: hero.jpg and hero.png both give hero.webp
           const { name, ext } = path.parse(output);
           let unique = `${name}${ext}`;
@@ -166,9 +201,5 @@ function createStore() {
 
 export type Store = ReturnType<typeof createStore>;
 
-// One store per process. Kept on globalThis because Next.js re-evaluates
-// modules in development, and uploads must survive that.
-const KEY = Symbol.for('media-compressor.store');
-const holder = globalThis as typeof globalThis & { [KEY]?: Store };
-
-export const getStore = (): Store => (holder[KEY] ??= createStore());
+const store = createStore();
+export const getStore = (): Store => store;
