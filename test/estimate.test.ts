@@ -3,8 +3,10 @@ import path from 'node:path';
 import { test } from 'node:test';
 import { imageCost, videoCost } from '../engine/estimate.ts';
 import { compressImage } from '../engine/images/compress.ts';
-import type { Progress } from '../engine/types.ts';
+import type { MediaKind, Progress } from '../engine/types.ts';
 import { compressVideo } from '../engine/videos/compress.ts';
+import { measureRun, remaining } from '../lib/estimate.ts';
+import type { Item } from '../lib/files.ts';
 import { configWith, hasCommand, jobFor, photo, tmpDir } from './helpers.ts';
 import { run } from '../engine/utils/exec.ts';
 
@@ -32,6 +34,53 @@ test('video cost follows duration, codecs and the quality check', () => {
   assert.ok(webm > mp4 * 3, 'two-pass VP9 takes several times longer than H.264');
   assert.ok(checked > mp4);
   assert.ok(longer > mp4 * 1.8);
+});
+
+test('time left starts from the learned speed and moves to the measured pace', () => {
+  // nothing measured yet: the work left at the learned speed
+  assert.equal(remaining({ done: 0, left: 60, elapsed: 2, rate: 1 }), 60);
+  // a fifth or more done: purely the pace so far (10 s for a quarter leaves 30 s)
+  assert.equal(remaining({ done: 25, left: 75, elapsed: 10, rate: 2 }), 30);
+  // in between: a blend of the two
+  assert.equal(remaining({ done: 10, left: 90, elapsed: 5, rate: 1 }), 67.5);
+  assert.equal(remaining({ done: 10, left: 0, elapsed: 5, rate: 1 }), 0);
+});
+
+const item = (key: string, kind: MediaKind, rest: Partial<Item>): Item => ({
+  key,
+  file: new File([], key),
+  name: key,
+  bytes: 1,
+  kind,
+  vector: false,
+  status: 'working',
+  ...rest,
+});
+
+test('a run with videos is paced by its videos, which run one at a time', () => {
+  const costs = { clip: 60, a: 5, b: 5 };
+  const progress = (overall: number) => ({ format: 'mp4', stage: 'crf 18', ratio: 0, overall, scale: 1 });
+  const items = [
+    item('clip', 'video', { progress: progress(0.25), fraction: 0.25 }),
+    item('a', 'image', { status: 'done' }),
+    item('b', 'image', { status: 'done' }),
+  ];
+  const run = measureRun(items, costs);
+  // the images finished alongside the video, so they don't speed up what is left
+  assert.deepEqual({ done: run.done, left: run.left }, { done: 15, left: 45 });
+  assert.equal(run.progress, (15 + 10) / 70);
+  assert.deepEqual({ files: run.files, finished: run.finished }, { files: 3, finished: 2 });
+
+  // a quality retry grows what is left; the bar holds where it was
+  const retried = measureRun([{ ...items[0]!, progress: progress(0.2), scale: 1.5 }, ...items.slice(1)], costs);
+  assert.deepEqual({ done: retried.done, left: retried.left }, { done: 18, left: 72 });
+  assert.equal(retried.progress, run.progress);
+});
+
+test('a run of images is paced by all of them together', () => {
+  const items = [item('a', 'image', { status: 'done' }), item('b', 'image', { status: 'waiting' })];
+  const run = measureRun(items, { a: 12, b: 12 });
+  assert.deepEqual({ done: run.done, left: run.left }, { done: 10, left: 10 });
 });
 
 test('an image reports each output as it starts, in step with the work', async (t) => {

@@ -117,13 +117,17 @@ const describeStage = (stage: string) =>
     pass ? `encoding, pass ${pass} of ${passes}` : 'encoding',
   );
 
-function statusOf(item: Item): { text: string; ratio: number | null } | null {
-  if (item.status === 'reading') return { text: 'Reading', ratio: null };
-  if (item.status === 'waiting') return { text: 'Waiting', ratio: null };
+// What the file is doing right now, in a few words. The bar for the whole run is in the dock.
+function statusOf(item: Item): string | null {
+  if (item.status === 'reading') return 'Reading';
+  if (item.status === 'waiting') return 'Waiting';
   if (item.status !== 'working') return null;
-  if (!item.progress) return { text: item.kind === 'video' ? 'Starting' : 'Compressing and checking every pixel', ratio: null };
-  const format = FORMAT_NAMES[item.progress.format] ?? item.progress.format;
-  return { text: `${format}: ${describeStage(item.progress.stage)}`, ratio: item.progress.ratio };
+  if (!item.progress) return item.kind === 'video' ? 'Starting' : 'Compressing';
+  const { format, stage, ratio } = item.progress;
+  const text = `${FORMAT_NAMES[format] ?? format}: ${describeStage(stage)}`;
+  // videos report how far each pass is, once it has a position; images report
+  // each output as it starts
+  return item.kind === 'video' && ratio > 0 ? `${text}, ${Math.round(ratio * 100)}%` : text;
 }
 
 export interface FileRowProps {
@@ -237,20 +241,10 @@ export function FileRow({ item, choice, canCustomise, open, stale, onToggle, onC
         </Section>
 
         <Section show={status !== null} id="status">
-          {status && (
-            <div className={`status${status.ratio === null ? ' is-indeterminate' : ''}`}>
-              <span className="status__track" aria-hidden="true">
-                <motion.span
-                  className="status__fill"
-                  initial={false}
-                  // the sweeping bar of unmeasured work runs full width
-                  animate={{ scaleX: status.ratio ?? 1 }}
-                  transition={{ duration: 0.4, ease: 'easeOut' }}
-                />
-              </span>
-              <span className="status__text">{status.ratio === null ? status.text : `${status.text}, ${Math.round(status.ratio * 100)}%`}</span>
-            </div>
-          )}
+          <p className="status status__text">
+            <span className="status__dot" aria-hidden="true" />
+            {status}
+          </p>
         </Section>
 
         <Section show={Boolean(item.outcome)} id="results">

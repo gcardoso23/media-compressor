@@ -1,3 +1,4 @@
+import type { MediaInfo } from '@/engine/estimate.ts';
 import type { PublicResult } from '@/engine/server/protocol.ts';
 import type { MediaKind, Progress } from '@/engine/types.ts';
 import type { Choice } from './choices.ts';
@@ -35,8 +36,14 @@ export interface Item {
   // the flags its current results were made with, to tell when they're out of date
   ran?: string;
   progress?: Progress;
+  // how far its current run is, from 0 to 1; never moves backwards
+  fraction?: number;
+  // its work in the current run against the plan: above 1 once a quality retry adds encodes
+  scale?: number;
   outcome?: Outcome;
   preview?: string;
+  // dimensions and length, for estimating the work
+  media?: MediaInfo | null;
 }
 
 // Folders can be dropped too: every file inside them is added.

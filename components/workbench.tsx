@@ -8,6 +8,7 @@ import type { MediaKind } from '@/engine/types.ts';
 import { limiter } from '@/engine/utils/pool.ts';
 import { compressFile, describeError, forgetFile, getTools, uploadFile } from '@/lib/api.ts';
 import { type Choice, type Choices, DEFAULTS, loadChoices, saveChoices, toFlags } from '@/lib/choices.ts';
+import { costOf, learnSpeed, measureRun, noWork, predict, remaining, speed, type RunState } from '@/lib/estimate.ts';
 import { type Item, filesFrom, videoFrame } from '@/lib/files.ts';
 import { plural } from '@/lib/format.ts';
 import { slow, smooth } from '@/lib/motion.ts';
@@ -20,6 +21,42 @@ const uploads = limiter(3);
 const runs = limiter(3);
 
 const KINDS: MediaKind[] = ['image', 'video'];
+
+interface Batch {
+  // the work each file in the run represents
+  costs: Record<string, number>;
+  started: number;
+  // the learned speed when it started
+  rate: number;
+  stopped: boolean;
+}
+
+// Seconds left in the run, recomputed twice a second and eased toward each new
+// figure, so it counts down steadily instead of jumping around.
+function useEta(batch: Batch | null, run: RunState | null, busy: boolean): number | null {
+  const [eta, setEta] = useState<number | null>(null);
+  const latest = useRef({ batch, run });
+  latest.current = { batch, run };
+
+  useEffect(() => {
+    if (!busy) {
+      setEta(null);
+      return;
+    }
+    const tick = () => {
+      const { batch: current, run: state } = latest.current;
+      if (!current || !state) return;
+      const elapsed = (performance.now() - current.started) / 1000;
+      const target = remaining({ done: state.done, left: state.left, elapsed, rate: current.rate });
+      setEta((shown) => (shown === null ? target : Math.max(0, shown - 0.5 + (target - (shown - 0.5)) * 0.2)));
+    };
+    tick();
+    const timer = setInterval(tick, 500);
+    return () => clearInterval(timer);
+  }, [busy]);
+
+  return eta;
+}
 
 // Files with settings to choose: everything but SVGs and files the tool can't read.
 const configurable = (item: Item): item is Item & { kind: MediaKind } => item.kind !== null && !item.vector;
@@ -41,8 +78,8 @@ export function Workbench() {
   const [shared, setShared] = useState<Choices>(DEFAULTS);
   // the file whose own settings are open
   const [open, setOpen] = useState<string | null>(null);
-  // the latest "Compress" press, for the progress line
-  const [batch, setBatch] = useState({ total: 0, finished: 0 });
+  // the latest "Compress" press: which files, how much work each, and when it began
+  const [batch, setBatch] = useState<Batch | null>(null);
   const [tools, setTools] = useState<Tools | null>(null);
   const [dragging, setDragging] = useState(false);
 
@@ -51,7 +88,12 @@ export function Workbench() {
   const uploaded = useRef(new Map<string, Promise<string | undefined>>());
   const controllers = useRef(new Map<string, AbortController>());
 
+  // Saved settings are read once. Development reloads re-run effects, and must
+  // not put back old settings over ones just changed.
+  const loaded = useRef(false);
   useEffect(() => {
+    if (loaded.current) return;
+    loaded.current = true;
     setShared(loadChoices());
     getTools()
       .then(setTools)
@@ -68,8 +110,8 @@ export function Workbench() {
     (item: Item) => {
       const pending = uploads(async () => {
         try {
-          const { id } = await uploadFile(item.file);
-          patch(item.key, (current) => ({ id, status: current.status === 'reading' ? 'ready' : current.status }));
+          const { id, media } = await uploadFile(item.file);
+          patch(item.key, (current) => ({ id, media, status: current.status === 'reading' ? 'ready' : current.status }));
           return id;
         } catch (error) {
           patch(item.key, { status: 'error', error: describeError(error) });
@@ -117,7 +159,7 @@ export function Workbench() {
       controllers.current.get(item.key)?.abort();
       const controller = new AbortController();
       controllers.current.set(item.key, controller);
-      patch(item.key, { status: 'waiting', progress: undefined, error: undefined });
+      patch(item.key, { status: 'waiting', progress: undefined, fraction: 0, scale: 1, error: undefined });
 
       await runs(async () => {
         if (controller.signal.aborted) return;
@@ -133,13 +175,23 @@ export function Workbench() {
         try {
           let finished = false;
           for await (const event of compressFile(id, flags, controller.signal)) {
-            if (event.type === 'progress') patch(item.key, { progress: event });
+            if (event.type === 'progress') {
+              // a quality retry adds work, so the share done can dip: the bar never goes back
+              const overall = Number.isFinite(event.overall) ? event.overall : 0;
+              const scale = Number.isFinite(event.scale) ? event.scale : 1;
+              patch(item.key, (current) => ({
+                progress: { ...event, overall, scale },
+                fraction: Math.max(current.fraction ?? 0, overall),
+                scale,
+              }));
+            }
             else if (event.type === 'error') throw new Error(event.message);
             else if (event.type === 'done') {
               finished = true;
               patch(item.key, {
                 status: 'done',
                 progress: undefined,
+                fraction: 1,
                 ran: JSON.stringify(flags),
                 outcome: { sourceBytes: event.sourceBytes, results: event.results, warnings: event.warnings },
               });
@@ -150,17 +202,29 @@ export function Workbench() {
           if (controller.signal.aborted) return;
           patch(item.key, { status: 'error', error: describeError(error) });
         }
-        setBatch((current) => ({ ...current, finished: current.finished + 1 }));
       });
     },
     [patch, upload],
   );
 
-  const compressAll = () => {
-    const pending = items.filter((item) => isPending(item, shared));
-    setBatch({ total: pending.length, finished: 0 });
+  const start = (targets: Item[]) => {
+    if (!targets.length) return;
+    const costs = Object.fromEntries(targets.map((item) => [item.key, costOf(item, shared) || 0]));
+    setBatch({ costs, started: performance.now(), rate: speed(), stopped: false });
     setOpen(null);
-    for (const item of pending) void run(item, flagsFor(item, shared));
+    for (const item of targets) void run(item, flagsFor(item, shared));
+  };
+
+  const compressAll = () => start(items.filter((item) => isPending(item, shared)));
+
+  // Cancels what is queued or running; files keep whatever results they had.
+  const stop = () => {
+    setBatch((current) => current && { ...current, stopped: true });
+    for (const item of items) {
+      if (item.status !== 'waiting' && item.status !== 'working') continue;
+      controllers.current.get(item.key)?.abort();
+      patch(item.key, (current) => ({ status: current.outcome ? 'done' : 'ready', progress: undefined, fraction: 0 }));
+    }
   };
 
   const forget = (item: Item) => {
@@ -184,9 +248,11 @@ export function Workbench() {
   };
 
   const changeShared = (kind: MediaKind, choice: Choice) => {
-    const next = { ...shared, [kind]: choice };
-    setShared(next);
-    saveChoices(next);
+    setShared((current) => {
+      const next = { ...current, [kind]: choice };
+      saveChoices(next);
+      return next;
+    });
   };
 
   const choose = () => picker.current?.click();
@@ -236,6 +302,24 @@ export function Workbench() {
   const count = (kind: MediaKind) => items.filter((item) => configurable(item) && item.kind === kind).length;
   const pending = items.filter((item) => isPending(item, shared)).length;
   const busy = items.filter((item) => item.status === 'waiting' || item.status === 'working').length;
+
+  // One bar for the whole run: each file counts for the work it is, not just as one of n.
+  const runState = batch ? measureRun(items, batch.costs) : null;
+  const eta = useEta(batch, runState, busy > 0);
+
+  const pendingWork = noWork();
+  for (const item of items) if (item.kind && isPending(item, shared)) pendingWork[item.kind] += costOf(item, shared);
+
+  // once a run finishes, how long it really took teaches the next estimate
+  const wasBusy = useRef(false);
+  const worked = runState?.done ?? 0;
+  useEffect(() => {
+    if (busy > 0) wasBusy.current = true;
+    else if (wasBusy.current && batch) {
+      wasBusy.current = false;
+      if (!batch.stopped) learnSpeed((performance.now() - batch.started) / 1000, worked);
+    }
+  }, [busy, batch, worked]);
 
   const missing: string[] = [];
   if (tools && !tools.ffmpeg) missing.push('Videos need ffmpeg: brew install ffmpeg.');
@@ -334,10 +418,7 @@ export function Workbench() {
                         if (open === item.key) setOpen(null);
                       }}
                       onRemove={() => remove(item)}
-                      onRetry={() => {
-                        setBatch({ total: 1, finished: 0 });
-                        void run(item, flagsFor(item, shared));
-                      }}
+                      onRetry={() => start([item])}
                     />
                   ))}
                 </AnimatePresence>
@@ -348,7 +429,21 @@ export function Workbench() {
       </main>
 
       <AnimatePresence>
-        {items.length > 0 && <Dock key="dock" items={items} pending={pending} busy={busy} batch={batch} onCompress={compressAll} />}
+        {items.length > 0 && (
+          <Dock
+            key="dock"
+            items={items}
+            pending={pending}
+            busy={busy}
+            files={runState?.files ?? 0}
+            finished={runState?.finished ?? 0}
+            progress={runState?.progress ?? 0}
+            eta={eta}
+            predicted={predict(pendingWork)}
+            onCompress={compressAll}
+            onStop={stop}
+          />
+        )}
       </AnimatePresence>
 
       <AnimatePresence>

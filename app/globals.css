@@ -575,41 +575,29 @@ select {
 }
 
 .status {
-  display: grid;
-  gap: 8px;
-}
-.status__track {
-  position: relative;
-  height: 2px;
-  overflow: hidden;
-  background: var(--line);
-}
-.status__fill {
-  position: absolute;
-  inset: 0;
-  background: var(--white);
-  transform-origin: left;
-}
-/* for work that can't report a percentage */
-.status.is-indeterminate .status__fill {
-  width: 30%;
-  animation: sweep 1.4s var(--ease) infinite;
-}
-@keyframes sweep {
-  from {
-    left: -30%;
-  }
-  to {
-    left: 100%;
-  }
+  margin: 0;
 }
 .status__text {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 14px;
+  align-items: center;
+  gap: 6px 10px;
   color: var(--muted);
   font-size: 14px;
   font-variant-numeric: tabular-nums;
+}
+/* a soft pulse that says this file is being worked on */
+.status__dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--white);
+  animation: pulse 1.6s ease-in-out infinite;
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.25;
+  }
 }
 .status--error .status__text {
   color: var(--white);
@@ -712,12 +700,21 @@ select {
   backdrop-filter: blur(18px);
 }
 
-.dock__progress {
+.dock__track {
   position: absolute;
   inset: -1px 0 auto;
-  height: 1px;
+  height: 2px;
+  overflow: hidden;
+}
+.dock__progress {
+  display: block;
+  height: 100%;
   background: var(--white);
   transform-origin: left;
+}
+
+.dock__status {
+  min-width: 0;
 }
 
 .dock__summary {
@@ -849,10 +846,7 @@ select {
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .status.is-indeterminate .status__fill {
+  .status__dot {
     animation: none;
-    left: 0;
-    width: 100%;
-    opacity: 0.5;
   }
 }

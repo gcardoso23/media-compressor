@@ -28,7 +28,10 @@ Without `ffmpeg` only images work. Without `jpegtran`, JPEGs are passed through 
 
 1. Drop images and videos onto the page, a whole folder, or paste from the clipboard.
 2. The settings for what you dropped appear: one set for all images and one for all videos. Any single file can be customised on its own.
-3. Press **Compress**. Each file shows what it weighed and what it weighs now, per format, with a download button. **Download all** gives a ZIP.
+3. Press **Compress**. One bar follows the whole run, weighted by how much work each file is (a 4K video counts for far more than a thumbnail), with the time left beside it. Each file says what it is doing as it goes.
+4. Each file shows what it weighed and what it weighs now, per format, with a download button. **Download all** gives a ZIP.
+
+The time left starts from what the settings, pixel counts and video lengths predict, and moves to the pace measured as the run goes. Each finished run teaches the estimate how fast this computer is.
 
 Change a setting afterwards and the affected files are marked; pressing Compress again redoes only those. Working files live in a temporary folder that is removed when the server stops.
 
@@ -150,6 +153,7 @@ engine/                 everything that touches files, shared by the interface a
   cli.ts                the folder scripts
   options.ts            settings shared by the interface and the folder scripts
   plan.ts               which files to write for each source
+  estimate.ts           how much work a file is, for the progress bar and the time left
 media.config.ts         every default, documented
 bin/compress.ts         entry point for the folder scripts
 test/                   npm test
